@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MKT Automation - Job Summarizer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .requirement-tag {
+            cursor: default;
+            transition: transform 150ms ease, box-shadow 150ms ease, background-color 150ms ease;
+        }
+        .requirement-tag:hover {
+            background-color: #2563eb;
+            color: #ffffff;
+            box-shadow: 0 6px 14px rgba(37, 99, 235, 0.25);
+            transform: translateY(-2px);
+        }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+    <div class="max-w-3xl mx-auto px-4 py-8">
+        <h1 class="text-3xl font-bold text-gray-800 mb-2">MKT Automation</h1>
+        <p class="text-gray-500 mb-8">Upload a job description file and get a summarized format</p>
+
+        <!-- Upload Form -->
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+            <div class="mb-4">
+                <label class="block text-sm font-medium text-gray-700 mb-2">Upload File (PDF or DOCX)</label>
+                <input type="file" id="fileInput" accept=".pdf,.docx"
+                       class="w-full border border-gray-300 rounded-lg p-2 text-sm">
+            </div>
+
+            <div class="mb-4">
+                <label class="block text-sm font-medium text-gray-700 mb-2">Requirements Format</label>
+                <select id="reqFormat" class="w-full border border-gray-300 rounded-lg p-2 text-sm">
+                    <option value="short">Text ngắn gọn (≤15 words)</option>
+                    <option value="ultra_short">Text siêu ngắn (≤8 words)</option>
+                    <option value="tag">Tag (≤3 words, keyword style)</option>
+                </select>
+            </div>
+
+            <div class="mb-4">
+                <label class="block text-sm font-medium text-gray-700 mb-2">Why Join Format</label>
+                <select id="whyJoinFormat" class="w-full border border-gray-300 rounded-lg p-2 text-sm">
+                    <option value="short">Text ngắn gọn (≤15 words)</option>
+                    <option value="ultra_short">Text siêu ngắn (≤8 words)</option>
+                </select>
+            </div>
+
+            <button id="submitBtn" onclick="summarize()"
+                    class="w-full bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 transition font-medium">
+                Summarize
+            </button>
+        </div>
+
+        <!-- Loading -->
+        <div id="loading" class="hidden text-center py-8">
+            <p class="text-gray-500">Processing... (first run may take longer to load the model)</p>
+        </div>
+
+        <!-- Error -->
+        <pre id="error" class="hidden bg-red-50 border border-red-200 text-red-700 rounded-lg p-4 mb-6 whitespace-pre-wrap font-mono text-sm"></pre>
+
+        <!-- Result -->
+        <div id="result" class="hidden bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-lg font-semibold text-gray-800">Result</h2>
+                <button onclick="copyResult()"
+                        class="bg-gray-100 text-gray-600 px-3 py-1 rounded hover:bg-gray-200 text-sm transition">
+                    Copy
+                </button>
+            </div>
+            <div id="resultView" class="bg-gray-50 rounded-lg p-4 text-sm text-gray-700"></div>
+            <pre id="resultText" class="hidden"></pre>
+        </div>
+    </div>
+
+    <script src="/static/app.js?v=3"></script>
+</body>
+</html>
