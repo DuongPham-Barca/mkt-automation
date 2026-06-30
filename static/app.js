@@ -106,7 +106,7 @@ function renderResult(data, requirementFormat) {
         .join(' | ');
     view.appendChild(createElement('p', 'font-medium mt-4', basicInfo));
     view.appendChild(createElement('p', 'mt-1', data.salary || 'N/A'));
-    if (data.bounty) view.appendChild(createElement('p', 'mt-1', data.bounty));
+    view.appendChild(createElement('p', 'mt-1', `Bounty: ${data.bounty || 'N/A'}`));
     if (data.short_description) {
         view.appendChild(createElement('p', 'mt-4 leading-relaxed', data.short_description));
     }

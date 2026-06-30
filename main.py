@@ -11,6 +11,12 @@ app = FastAPI(title="MKT Automation - Job Summarizer")
 app.mount("/static", StaticFiles(directory=settings.STATIC_DIR), name="static")
 app.include_router(router)
 
+
+@app.get("/healthz", include_in_schema=False)
+async def healthcheck():
+    return {"status": "ok"}
+
+
 @app.get("/")
 async def root():
     return FileResponse(settings.STATIC_DIR / "index.html")

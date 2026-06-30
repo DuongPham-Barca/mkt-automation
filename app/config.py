@@ -8,6 +8,7 @@ class Settings:
     MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
     MAX_INPUT_LENGTH = 512
     MAX_FIELD_OUTPUT_LENGTH = 48
+    MAX_DESCRIPTION_OUTPUT_LENGTH = 96
     # Decoder-only models use considerably more memory per prompt than T5.
     INFERENCE_BATCH_SIZE = 1
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"

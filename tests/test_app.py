@@ -43,6 +43,11 @@ class ApplicationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("MKT Automation", response.text)
 
+    def test_healthcheck_does_not_load_model(self) -> None:
+        response = self.client.get("/healthz")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ok"})
+
     def test_missing_url_returns_422(self) -> None:
         response = self.client.post(
             "/api/summarize-url",
@@ -128,8 +133,8 @@ class SummarizerNormalizationTests(unittest.TestCase):
 
         result = summarizer._normalize_answers(answers, "short", "short")
 
-        self.assertEqual(result.short_description, "Python Developer role requiring Python, FastAPI.")
-        self.assertEqual(result.requirements, ["Python", "FastAPI"])
+        self.assertEqual(result.short_description, "Python Developer role.")
+        self.assertEqual(result.requirements, [])
         self.assertEqual(result.why_join, [])
 
     def test_word_limits_follow_both_prd_options(self) -> None:
@@ -147,7 +152,12 @@ class SummarizerNormalizationTests(unittest.TestCase):
             "why_join": "one two three four five six seven eight nine ten",
         }
 
-        result = summarizer._normalize_answers(answers, "tag", "ultra_short")
+        result = summarizer._normalize_answers(
+            answers,
+            "tag",
+            "ultra_short",
+            source_text="Responsibilities\none two three four five six seven eight nine ten",
+        )
 
         self.assertLessEqual(len(result.requirements[0].split()), 3)
         self.assertLessEqual(len(result.why_join[0].split()), 8)
@@ -162,6 +172,86 @@ class SummarizerNormalizationTests(unittest.TestCase):
         )
 
         self.assertIn("[8+ YOE] [Golang Expert] [AWS]", text)
+        self.assertIn("Bounty: N/A", text)
+
+    def test_responsibility_tags_are_semantically_complete(self) -> None:
+        summarizer = Summarizer.__new__(Summarizer)
+        values = {
+            "Accountable for the quality of agile ceremonies": "Agile Ceremony Quality",
+            "Ability to provide constructive and timely feedback": "Constructive Feedback",
+            "Conflict resolution within delivery teams": "Conflict Resolution",
+            "Ability to negotiate priorities and timelines": "Priority Negotiation",
+            "Ensuring the team commits to their definition of done": "Definition of Done",
+            "Careful": "Detail-Oriented",
+            "Passionate and have high sense of responsibility": "High Responsibility",
+            "From 3 years of experience playing Scrum Master": "3+ YOE Scrum",
+        }
+
+        for source, expected in values.items():
+            with self.subTest(source=source):
+                tag = summarizer._compact_requirement_tag(source)
+                self.assertEqual(tag, expected)
+                self.assertLessEqual(len(tag.split()), 3)
+
+    def test_labeled_bounty_is_extracted_from_source(self) -> None:
+        summarizer = Summarizer.__new__(Summarizer)
+        answers = {
+            "job_title": "Developer",
+            "subtitle": "",
+            "employment_type": "Full-time",
+            "contract_type": "Permanent",
+            "location": "Remote",
+            "salary": "",
+            "bounty": "N/A",
+            "short_description": "",
+            "requirements": "Python",
+            "why_join": "Flexible hours",
+        }
+
+        result = summarizer._normalize_answers(
+            answers,
+            "short",
+            "short",
+            source_text="Developer role\nBounty: 20,000,000 VND\nRequirements: Python",
+        )
+
+        self.assertEqual(result.bounty, "20,000,000 VND")
+
+    def test_bounty_badge_without_colon_is_extracted(self) -> None:
+        self.assertEqual(
+            Summarizer._extract_bounty("Bounty ₫ 23,040,000\nPosted 5d ago"),
+            "₫ 23,040,000",
+        )
+
+    def test_description_ends_at_complete_clause(self) -> None:
+        description = (
+            "The Technical Architect position involves leading a team responsible for designing, "
+            "developing, and maintaining complex software systems using JavaScript and related "
+            "technologies, working closely with other teams such as the"
+        )
+
+        compact = Summarizer._compact_description(description)
+
+        self.assertEqual(
+            compact,
+            "The Technical Architect position involves leading a team responsible for designing, "
+            "developing, and maintaining complex software systems using JavaScript and related "
+            "technologies, working closely with other teams.",
+        )
+        self.assertLessEqual(len(compact.split()), 60)
+
+    def test_description_keeps_multiple_sentences(self) -> None:
+        description = (
+            "Lead the design and delivery of scalable JavaScript systems across the platform. "
+            "Guide engineers, define technical standards, and collaborate with product teams to "
+            "turn business requirements into reliable solutions. Improve architecture, code quality, "
+            "and operational performance while mentoring the development team."
+        )
+
+        compact = Summarizer._compact_description(description)
+
+        self.assertEqual(compact, description)
+        self.assertEqual(compact.count("."), 3)
 
     def test_labeled_sections_override_missing_model_answers(self) -> None:
         summarizer = Summarizer.__new__(Summarizer)
@@ -190,11 +280,69 @@ class SummarizerNormalizationTests(unittest.TestCase):
             source_text=source,
         )
 
-        self.assertEqual(result.requirements[0], "8+ YOE Python")
-        self.assertIn("deep Golang expertise", result.requirements)
+        self.assertEqual(result.requirements, [])
         self.assertIn("competitive salary", result.why_join)
         self.assertTrue(all(len(item.split()) <= 3 for item in result.requirements))
         self.assertTrue(all(len(item.split()) <= 8 for item in result.why_join))
+
+    def test_responsibilities_are_mapped_to_requirements_output(self) -> None:
+        summarizer = Summarizer.__new__(Summarizer)
+        answers = {
+            "job_title": "Technical Architect",
+            "subtitle": "",
+            "employment_type": "Full-time",
+            "contract_type": "Permanent",
+            "location": "Remote",
+            "salary": "",
+            "bounty": "",
+            "short_description": "Lead architecture and engineering delivery.",
+            "requirements": "N/A",
+            "why_join": "N/A",
+        }
+        source = (
+            "Responsibilities\n"
+            "- Lead the design of scalable JavaScript systems\n"
+            "- Collaborate with product and engineering teams\n"
+            "Requirements\n"
+            "- Ten years of software engineering experience\n"
+            "Benefits\n"
+            "- Flexible working hours"
+        )
+
+        result = summarizer._normalize_answers(
+            answers,
+            "short",
+            "short",
+            source_text=source,
+        )
+
+        self.assertEqual(
+            result.requirements,
+            [
+                "Lead the design of scalable JavaScript systems",
+                "Collaborate with product and engineering teams",
+            ],
+        )
+        self.assertNotIn("Ten years of software engineering experience", result.requirements)
+
+    def test_responsibilities_stop_at_html_requirements_heading(self) -> None:
+        html = (
+            b"<h2>Responsibilities</h2><ul><li>Facilitate agile ceremonies</li>"
+            b"<li>Coach the delivery team</li></ul><h2>Requirements</h2>"
+            b"<p>From 3 years as Scrum Master</p><h2>Note for recruiter</h2>"
+            b"<p>Internal recruiter notes</p>"
+        )
+        source = _extract_visible_text(html, "text/html", "utf-8")
+
+        section = Summarizer._extract_heading_section(
+            source,
+            r"(?:key\s+)?responsibilities?",
+        )
+
+        self.assertIn("Facilitate agile ceremonies", section)
+        self.assertIn("Coach the delivery team", section)
+        self.assertNotIn("From 3 years", section)
+        self.assertNotIn("Internal recruiter notes", section)
 
     def test_why_join_us_heading_does_not_leak_into_requirement_tags(self) -> None:
         summarizer = Summarizer.__new__(Summarizer)
@@ -229,10 +377,7 @@ class SummarizerNormalizationTests(unittest.TestCase):
             source_text=source,
         )
 
-        self.assertEqual(
-            result.requirements,
-            ["5+ YOE Python", "Golang", "AWS", "SQL", "English Communication"],
-        )
+        self.assertEqual(result.requirements, [])
         self.assertEqual(
             result.why_join,
             ["Competitive salary and annual leave", "Private health insurance"],

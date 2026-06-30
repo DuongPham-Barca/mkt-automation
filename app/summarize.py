@@ -16,8 +16,10 @@ FIELD_QUESTIONS = {
     "location": "Where is the job located?",
     "salary": "What is the salary?",
     "bounty": "Is a referral or hiring bounty explicitly stated? If not, answer N/A.",
-    "short_description": "Summarize this job in one short sentence.",
-    "requirements": "List the job requirements, separated by semicolons.",
+    "short_description": (
+        "Summarize this job in 2-3 complete sentences (40-60 words). Cover the main "
+        "responsibilities, core technologies or skills, and collaboration or business impact."
+    ),
     "why_join": "List the reasons to join, separated by semicolons.",
 }
 
@@ -27,8 +29,8 @@ class Summarizer:
         self.device = settings.DEVICE
         print(f"Loading model {settings.MODEL_NAME} on {self.device}...")
 
-        # bfloat16 keeps the 1.5B model usable on CPU without a 6+ GB fp32 copy.
-        dtype = torch.float16 if self.device == "cuda" else torch.bfloat16
+        # float32 is slower but broadly supported by free CPU-only Linux hosts.
+        dtype = torch.float16 if self.device == "cuda" else torch.float32
         self.tokenizer = AutoTokenizer.from_pretrained(settings.MODEL_NAME)
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -70,6 +72,7 @@ class Summarizer:
 
         for start in range(0, len(prompts), batch_size):
             batch = prompts[start : start + batch_size]
+            batch_fields = list(FIELD_QUESTIONS)[start : start + batch_size]
             chat_batch = [
                 self.tokenizer.apply_chat_template(
                     [
@@ -98,7 +101,11 @@ class Summarizer:
             with torch.inference_mode():
                 outputs = self.model.generate(
                     **inputs,
-                    max_new_tokens=settings.MAX_FIELD_OUTPUT_LENGTH,
+                    max_new_tokens=(
+                        settings.MAX_DESCRIPTION_OUTPUT_LENGTH
+                        if "short_description" in batch_fields
+                        else settings.MAX_FIELD_OUTPUT_LENGTH
+                    ),
                     do_sample=False,
                     repetition_penalty=1.1,
                     no_repeat_ngram_size=3,
@@ -131,6 +138,45 @@ class Summarizer:
         return " ".join(words[:limit]).strip(" ,;.-")
 
     @staticmethod
+    def _compact_description(value: str, word_limit: int = 60) -> str:
+        text = " ".join(value.split()).strip(" \t\r\n\"'")
+        if not text:
+            return ""
+
+        if len(text.split()) > word_limit:
+            sentence_candidates = [
+                match.end()
+                for match in re.finditer(r"[.!?](?=\s|$)", text)
+                if 25 <= len(text[:match.end()].split()) <= word_limit
+            ]
+            if sentence_candidates:
+                text = text[:sentence_candidates[-1]]
+            else:
+                clause_candidates = [
+                    match.end()
+                    for match in re.finditer(r"[,;](?=\s|$)", text)
+                    if 20 <= len(text[:match.end()].split()) <= word_limit
+                ]
+                if clause_candidates:
+                    text = text[:clause_candidates[-1]]
+                else:
+                    text = " ".join(text.split()[:word_limit])
+
+        if text.rstrip().endswith((".", "!", "?")):
+            return text.rstrip()
+
+        dangling_words = {
+            "a", "an", "and", "as", "at", "by", "for", "from", "in", "of",
+            "on", "or", "such", "the", "to", "with",
+        }
+        words = text.rstrip(" ,;:.!?").split()
+        while words and words[-1].lower() in dangling_words:
+            words.pop()
+        if not words:
+            return ""
+        return " ".join(words).rstrip(" ,;:") + "."
+
+    @staticmethod
     def _extract_labeled_section(
         text: str,
         labels: str,
@@ -155,8 +201,56 @@ class Summarizer:
         return section.strip(" \t\r\n.-")
 
     @staticmethod
+    def _extract_heading_section(text: str, labels: str, *_ignored: str) -> str:
+        heading = re.search(
+            rf"(?:^|[\r\n])\s*(?:\[\[HEADING\]\]\s*)?(?:{labels})"
+            rf"\s*(?:[:?\-]\s*)?(?:[\r\n]|$)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if not heading:
+            return ""
+
+        section = text[heading.end():]
+        next_heading = re.search(
+            r"(?:^|[\r\n])\s*(?:\[\[HEADING\]\]\s*)?"
+            r"(?:requirements?|qualifications?|minimum\s+qualifications?|"
+            r"note\s+for\s+recruiter|benefits?|why\s+join(?:\s+us)?|"
+            r"job\s+description|about\s+(?:the\s+)?(?:job|role))"
+            r"\s*(?:[:?\-]\s*)?(?:[\r\n]|$)",
+            section,
+            flags=re.IGNORECASE,
+        )
+        if next_heading:
+            section = section[:next_heading.start()]
+        else:
+            flattened_heading = re.search(
+                r"\s+(?:Requirements?|Qualifications?|Minimum Qualifications?|"
+                r"Note for Recruiter|Benefits?|Why Join(?: Us)?)\s*(?:[:?\-]\s*)?",
+                section,
+            )
+            if flattened_heading:
+                section = section[:flattened_heading.start()]
+        return section.strip(" \t\r\n.-")
+
+    @staticmethod
     def _compact_requirement_tag(value: str) -> str:
         value = re.sub(r"^(?:and|or)\s+", "", value, flags=re.IGNORECASE)
+
+        semantic_rules = (
+            (r"quality\s+of\s+(?:agile\s+)?ceremon(?:y|ies)", "Agile Ceremony Quality"),
+            (r"constructive(?:\s+and\s+timely)?\s+feedback", "Constructive Feedback"),
+            (r"conflict\s+resolution", "Conflict Resolution"),
+            (r"negotiat\w*\s+(?:priorities|priority|timelines)", "Priority Negotiation"),
+            (r"english\s+communication", "English Communication"),
+            (r"definition\s+of\s+done", "Definition of Done"),
+            (r"(?:careful|detail[- ]oriented)", "Detail-Oriented"),
+            (r"(?:high\s+sense\s+of\s+responsibility|passionate\s+and)", "High Responsibility"),
+            (r"(?:daily\s+scrum|scrums)\b", "Daily Scrum"),
+        )
+        for pattern, tag in semantic_rules:
+            if re.search(pattern, value, flags=re.IGNORECASE):
+                return tag
 
         degree = re.match(
             r"^(?:a\s+)?bachelor'?s?\s+degree(?:\s+in\s+(.+))?$",
@@ -177,6 +271,7 @@ class Summarizer:
             stop_words = {
                 "of", "professional", "development", "experience", "working",
                 "with", "in", "the", "a", "an", "strong", "knowledge",
+                "playing", "as", "role",
             }
             skill = next(
                 (
@@ -198,9 +293,41 @@ class Summarizer:
         if prefix:
             return prefix.group(1)
 
+        action_prefix = re.match(
+            r"^(?:ability\s+to|able\s+to|accountable\s+for|responsible\s+for|"
+            r"responsibility\s+for|capable\s+of)\s+(?:the\s+)?(.+)$",
+            value,
+            flags=re.IGNORECASE,
+        )
+        if action_prefix:
+            return action_prefix.group(1)
+
         if re.match(r"^good\s+english\s+communication", value, flags=re.IGNORECASE):
             return "English Communication"
         return value
+
+    @staticmethod
+    def _extract_bounty(text: str) -> str:
+        money_match = re.search(
+            r"(?:referral\s+bonus|referral\s+bounty|hiring\s+bounty|bounty)"
+            r"\s*(?::|\-)?\s*"
+            r"((?:[$₫đ€£]|VND|USD)\s*[\d][\d.,\s]*"
+            r"|[\d][\d.,\s]*(?:VND|USD|[$₫đ€£]))",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if money_match:
+            return re.sub(r"\s+", " ", money_match.group(1)).strip(" \t.,;-")
+
+        labeled_match = re.search(
+            r"(?:referral\s+bonus|referral\s+bounty|hiring\s+bounty|bounty)"
+            r"\s*[:\-]\s*([^\r\n|]{1,80})",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if not labeled_match:
+            return ""
+        return labeled_match.group(1).strip(" \t.,;-")
 
     def _clean_list(
         self,
@@ -233,6 +360,12 @@ class Summarizer:
     ) -> SummarizeResponse:
         data = {key: self._clean_scalar(value) for key, value in answers.items()}
 
+        source_responsibilities = self._extract_heading_section(
+            source_text,
+            r"(?:key\s+)?responsibilities?|what\s+you(?:'|’)?ll\s+do|your\s+role",
+            r"requirements?|qualifications?|benefits?|why\s+join(?:\s+us)?|"
+            r"job\s+description|about\s+(?:the\s+)?(?:job|role)",
+        )
         source_requirements = self._extract_labeled_section(
             source_text,
             r"requirements?|qualifications?|yêu cầu(?: công việc)?",
@@ -243,10 +376,12 @@ class Summarizer:
             r"benefits?|why\s+join(?:\s+us)?|quyền lợi|phúc lợi",
             r"requirements?|qualifications?|yêu cầu(?: công việc)?|responsibilities?|mô tả công việc",
         )
-        if source_requirements:
-            data["requirements"] = source_requirements
+        data["requirements"] = source_responsibilities
         if source_why_join:
             data["why_join"] = source_why_join
+        source_bounty = self._extract_bounty(source_text)
+        if source_bounty:
+            data["bounty"] = source_bounty
 
         employment = data["employment_type"].lower()
         if "full" in employment:
@@ -274,8 +409,7 @@ class Summarizer:
             data.pop("why_join"), why_join_limits[why_join_format]
         )
 
-        description_lines = data["short_description"].splitlines()
-        description = self._truncate_words(description_lines[0] if description_lines else "", 30)
+        description = self._compact_description(data["short_description"])
         if not description and data["job_title"]:
             description = f"{data['job_title']} role"
             if data["location"]:

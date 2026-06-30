@@ -19,8 +19,7 @@ def format_output(
     lines.append(f"{emp} | {contract} | {loc}")
 
     lines.append(normalized.salary or "N/A")
-    if normalized.bounty:
-        lines.append(normalized.bounty)
+    lines.append(f"Bounty: {normalized.bounty or 'N/A'}")
 
     if normalized.short_description:
         lines.extend(["", normalized.short_description])

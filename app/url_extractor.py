@@ -13,6 +13,7 @@ ALLOWED_CONTENT_TYPES = {"text/html", "application/xhtml+xml", "text/plain"}
 
 class _VisibleTextParser(HTMLParser):
     BLOCKED_TAGS = {"script", "style", "noscript", "svg", "template"}
+    HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
     SEPARATOR_TAGS = {
         "article", "br", "div", "footer", "h1", "h2", "h3", "h4", "h5", "h6",
         "header", "li", "main", "p", "section", "td", "th", "tr",
@@ -27,6 +28,8 @@ class _VisibleTextParser(HTMLParser):
         tag = tag.lower()
         if tag in self.BLOCKED_TAGS:
             self.blocked_depth += 1
+        elif not self.blocked_depth and tag in self.HEADING_TAGS:
+            self.parts.append("\n[[HEADING]] ")
         elif not self.blocked_depth and tag in self.SEPARATOR_TAGS:
             self.parts.append("\n")
 
