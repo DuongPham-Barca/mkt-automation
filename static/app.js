@@ -1,5 +1,5 @@
 async function summarize() {
-    const fileInput = document.getElementById('fileInput');
+    const urlInput = document.getElementById('urlInput');
     const reqFormat = document.getElementById('reqFormat').value;
     const whyJoinFormat = document.getElementById('whyJoinFormat').value;
     const submitBtn = document.getElementById('submitBtn');
@@ -8,8 +8,8 @@ async function summarize() {
     const result = document.getElementById('result');
 
     // Validate
-    if (!fileInput.files || !fileInput.files[0]) {
-        showError('Please select a file first.');
+    if (!urlInput.value.trim() || !urlInput.checkValidity()) {
+        showError('Please enter a valid HTTP or HTTPS URL.');
         return;
     }
 
@@ -20,12 +20,12 @@ async function summarize() {
     submitBtn.disabled = true;
 
     const formData = new FormData();
-    formData.append('file', fileInput.files[0]);
+    formData.append('url', urlInput.value.trim());
     formData.append('req_format', reqFormat);
     formData.append('why_join_format', whyJoinFormat);
 
     try {
-        const res = await fetch('/api/upload', { method: 'POST', body: formData });
+        const res = await fetch('/api/summarize-url', { method: 'POST', body: formData });
         const responseText = await res.text();
         let data;
 

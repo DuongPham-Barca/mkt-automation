@@ -2,7 +2,7 @@ import json
 import re
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, Gemma3ForConditionalGeneration
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from app.config import settings
 from app.models import SummarizeResponse
@@ -34,7 +34,7 @@ class Summarizer:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.tokenizer.padding_side = "left"
 
-        self.model = Gemma3ForConditionalGeneration.from_pretrained(
+        self.model = AutoModelForCausalLM.from_pretrained(
             settings.MODEL_NAME,
             dtype=dtype,
         ).to(self.device)

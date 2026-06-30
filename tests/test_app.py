@@ -1,23 +1,16 @@
-import io
 import unittest
 from unittest.mock import patch
 
-from docx import Document
 from fastapi.testclient import TestClient
 
 import app.router as router_module
-from app.config import settings
 from app.formatter import format_output
 from app.summarize import Summarizer
+from app.url_extractor import _extract_visible_text, _validate_public_url
 from main import app
 
 
-def make_docx(text: str) -> bytes:
-    buffer = io.BytesIO()
-    document = Document()
-    document.add_paragraph(text)
-    document.save(buffer)
-    return buffer.getvalue()
+VALID_TEXT = "Senior Python developer position with FastAPI experience required."
 
 
 class FakeSummarizer:
@@ -41,91 +34,80 @@ class ApplicationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.client = TestClient(app, raise_server_exceptions=False)
         router_module.summarizer = FakeSummarizer()
-        self.initial_uploads = set(settings.UPLOAD_DIR.iterdir())
 
     def tearDown(self) -> None:
         router_module.summarizer = None
-        self.assertEqual(set(settings.UPLOAD_DIR.iterdir()), self.initial_uploads)
 
     def test_root_page_is_available(self) -> None:
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertIn("MKT Automation", response.text)
 
-    def test_unsupported_extension_returns_415(self) -> None:
+    def test_missing_url_returns_422(self) -> None:
         response = self.client.post(
-            "/api/upload",
-            files={"file": ("job.txt", b"not supported", "text/plain")},
+            "/api/summarize-url",
             data={"req_format": "short"},
         )
-        self.assertEqual(response.status_code, 415)
-        self.assertIn("Unsupported file type", response.json()["detail"])
+        self.assertEqual(response.status_code, 422)
 
     def test_invalid_requirement_format_returns_422(self) -> None:
         response = self.client.post(
-            "/api/upload",
-            files={"file": ("job.docx", make_docx("A valid job description with enough text."))},
-            data={"req_format": "invalid"},
+            "/api/summarize-url",
+            data={"url": "https://example.com/job", "req_format": "invalid"},
         )
         self.assertEqual(response.status_code, 422)
 
     def test_invalid_why_join_format_returns_422(self) -> None:
         response = self.client.post(
-            "/api/upload",
-            files={"file": ("job.docx", make_docx("A valid job description with enough text."))},
-            data={"req_format": "short", "why_join_format": "tag"},
+            "/api/summarize-url",
+            data={"url": "https://example.com/job", "req_format": "short", "why_join_format": "tag"},
         )
         self.assertEqual(response.status_code, 422)
 
-    def test_short_document_returns_json_422(self) -> None:
-        response = self.client.post(
-            "/api/upload",
-            files={"file": ("job.docx", make_docx("tiny"))},
-            data={"req_format": "short"},
-        )
+    @patch("app.router.fetch_url_text", side_effect=ValueError("Could not extract enough text from the URL."))
+    def test_short_page_returns_json_422(self, _fetch) -> None:
+        response = self.client.post("/api/summarize-url", data={"url": "https://example.com/job"})
         self.assertEqual(response.status_code, 422)
         self.assertEqual(response.headers["content-type"], "application/json")
         self.assertIn("enough text", response.json()["detail"])
 
-    def test_large_upload_returns_413(self) -> None:
-        with patch.object(settings, "MAX_UPLOAD_SIZE", 8):
-            response = self.client.post(
-                "/api/upload",
-                files={"file": ("job.docx", make_docx("A sufficiently long job description."))},
-                data={"req_format": "short"},
-            )
-        self.assertEqual(response.status_code, 413)
-
-    def test_valid_document_returns_formatted_result(self) -> None:
+    @patch("app.router.fetch_url_text", return_value=VALID_TEXT)
+    def test_valid_url_returns_formatted_result(self, _fetch) -> None:
         response = self.client.post(
-            "/api/upload",
-            files={
-                "file": (
-                    "job.docx",
-                    make_docx("Senior Python developer position with FastAPI experience required."),
-                )
-            },
-            data={"req_format": "short"},
+            "/api/summarize-url",
+            data={"url": "https://example.com/job", "req_format": "short"},
         )
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(body["data"]["job_title"], "Python Developer")
         self.assertIn("PYTHON DEVELOPER", body["formatted_text"])
 
-    def test_tag_and_ultra_short_options_reach_api(self) -> None:
+    @patch("app.router.fetch_url_text", return_value=VALID_TEXT)
+    def test_tag_and_ultra_short_options_reach_api(self, _fetch) -> None:
         response = self.client.post(
-            "/api/upload",
-            files={
-                "file": (
-                    "job.docx",
-                    make_docx("Senior Python developer position with FastAPI experience required."),
-                )
+            "/api/summarize-url",
+            data={
+                "url": "https://example.com/job",
+                "req_format": "tag",
+                "why_join_format": "ultra_short",
             },
-            data={"req_format": "tag", "why_join_format": "ultra_short"},
         )
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("[Python] [FastAPI]", response.json()["formatted_text"])
+
+
+class UrlExtractorTests(unittest.TestCase):
+    def test_extracts_visible_html_and_ignores_scripts(self) -> None:
+        html = b"<html><script>ignore me</script><h1>Python Developer</h1><p>Build APIs with FastAPI.</p></html>"
+        text = _extract_visible_text(html, "text/html", "utf-8")
+        self.assertIn("Python Developer", text)
+        self.assertIn("Build APIs with FastAPI.", text)
+        self.assertNotIn("ignore me", text)
+
+    def test_private_ip_url_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "private network"):
+            _validate_public_url("http://127.0.0.1/job")
 
 
 class SummarizerNormalizationTests(unittest.TestCase):
