@@ -2,17 +2,13 @@ FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    OMP_NUM_THREADS=2 \
-    MKL_NUM_THREADS=2 \
-    HF_HOME=/home/user/.cache/huggingface
+    PIP_NO_CACHE_DIR=1
 
 RUN useradd --create-home --uid 1000 user
 WORKDIR /home/user/app
 
 COPY requirements-space.txt .
 RUN python -m pip install --upgrade pip && \
-    python -m pip install torch==2.12.1 --index-url https://download.pytorch.org/whl/cpu && \
     python -m pip install -r requirements-space.txt
 
 COPY --chown=user:user app ./app

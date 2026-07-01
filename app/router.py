@@ -1,5 +1,4 @@
 import logging
-import threading
 from typing import Literal
 
 from fastapi import APIRouter, Form, HTTPException, status
@@ -15,7 +14,6 @@ from app.url_extractor import fetch_url_text
 logger = logging.getLogger(__name__)
 router = APIRouter()
 summarizer: Summarizer | None = None
-inference_lock = threading.Lock()
 
 
 def get_summarizer() -> Summarizer:
@@ -23,12 +21,6 @@ def get_summarizer() -> Summarizer:
     if summarizer is None:
         summarizer = Summarizer()
     return summarizer
-
-
-def summarize_text(text: str, req_format: str, why_join_format: str) -> dict:
-    # Model initialization, lock waiting, and GPU work all stay off the event loop.
-    with inference_lock:
-        return get_summarizer().summarize(text, req_format, why_join_format)
 
 
 @router.post("/api/summarize-url", response_model=OutputData)
@@ -41,7 +33,7 @@ async def summarize_url(
         text = await run_in_threadpool(fetch_url_text, url)
 
         result = await run_in_threadpool(
-            summarize_text,
+            get_summarizer().summarize,
             text,
             req_format,
             why_join_format,

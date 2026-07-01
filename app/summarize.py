@@ -1,129 +1,101 @@
 import json
 import re
 
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from google import genai
+from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.models import SummarizeResponse
 
 
-FIELD_QUESTIONS = {
-    "job_title": "What is the job title?",
-    "subtitle": "Write a short subtitle for this job.",
-    "employment_type": "What is the employment type? Answer Full-time, Part-time, or Contract.",
-    "contract_type": "Is this job permanent, temporary, fixed-term, freelance, or another contract type?",
-    "location": "Where is the job located?",
-    "salary": "What is the salary?",
-    "bounty": "Is a referral or hiring bounty explicitly stated? If not, answer N/A.",
+SYSTEM_PROMPT = (
+    "You extract facts from job descriptions. "
+    "Never invent missing information."
+)
+
+FIELD_DEFINITIONS = {
+    "job_title": "job title (exact as written)",
+    "subtitle": "short subtitle (1 phrase, under 10 words)",
+    "employment_type": "employment type: Full-time, Part-time, or Contract",
+    "contract_type": "contract type: permanent, temporary, fixed-term, freelance, or other",
+    "location": "job location",
+    "salary": "salary (exact amount if stated, otherwise N/A)",
+    "bounty": "referral / hiring bounty (exact amount if stated, otherwise N/A)",
     "short_description": (
-        "Summarize this job in 2-3 complete sentences (40-60 words). Cover the main "
-        "responsibilities, core technologies or skills, and collaboration or business impact."
+        "short description: 1-2 complete sentences (25-35 words). "
+        "Keep only the primary responsibility, core technologies/skills, "
+        "and the role's main impact. Avoid generic or repeated details."
     ),
-    "why_join": "List the reasons to join, separated by semicolons.",
+    "requirements": (
+        "4-5 most important job requirement keywords or short phrases, separated by "
+        "semicolons. Prioritize required skills, technologies, years of experience, "
+        "domain knowledge, language, and education. Preserve exact technology names "
+        "and numeric experience from the job description; never invent requirements."
+    ),
+    "why_join": (
+        "benefits explicitly listed in the Benefits, Perks, What We Offer, or Why Join "
+        "section, separated by semicolons; otherwise N/A"
+    ),
 }
+
+
+class GeminiExtraction(BaseModel):
+    job_title: str = Field(description=FIELD_DEFINITIONS["job_title"])
+    subtitle: str = Field(description=FIELD_DEFINITIONS["subtitle"])
+    employment_type: str = Field(description=FIELD_DEFINITIONS["employment_type"])
+    contract_type: str = Field(description=FIELD_DEFINITIONS["contract_type"])
+    location: str = Field(description=FIELD_DEFINITIONS["location"])
+    salary: str = Field(description=FIELD_DEFINITIONS["salary"])
+    bounty: str = Field(description=FIELD_DEFINITIONS["bounty"])
+    short_description: str = Field(description=FIELD_DEFINITIONS["short_description"])
+    requirements: str = Field(description=FIELD_DEFINITIONS["requirements"])
+    why_join: str = Field(description=FIELD_DEFINITIONS["why_join"])
 
 
 class Summarizer:
     def __init__(self):
-        self.device = settings.DEVICE
-        print(f"Loading model {settings.MODEL_NAME} on {self.device}...")
+        self.client: genai.Client | None = None
 
-        # float32 is slower but broadly supported by free CPU-only Linux hosts.
-        dtype = torch.float16 if self.device == "cuda" else torch.float32
-        self.tokenizer = AutoTokenizer.from_pretrained(settings.MODEL_NAME)
-        if self.tokenizer.pad_token_id is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.tokenizer.padding_side = "left"
-
-        self.model = AutoModelForCausalLM.from_pretrained(
-            settings.MODEL_NAME,
-            dtype=dtype,
-        ).to(self.device)
-        self.model.eval()
-        print("Model loaded successfully!")
+    def _get_client(self) -> genai.Client:
+        if self.client is None:
+            if not settings.GEMINI_API_KEY:
+                raise RuntimeError("GEMINI_API_KEY is not configured.")
+            self.client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        return self.client
 
     def _truncate_context(self, text: str) -> str:
-        context_limit = max(128, settings.MAX_INPUT_LENGTH - 96)
-        token_ids = self.tokenizer.encode(
-            text,
-            add_special_tokens=False,
-            max_length=context_limit,
-            truncation=True,
-        )
-        return self.tokenizer.decode(token_ids, skip_special_tokens=True)
+        max_chars = settings.MAX_INPUT_LENGTH * 4
+        return text[:max_chars] if len(text) > max_chars else text
 
-    def build_prompts(self, text: str) -> list[str]:
+    def build_prompt(self, text: str) -> str:
         context = self._truncate_context(text)
-        return [
-            (
-                "Answer the question using only the job description. "
-                "If the information is missing, answer N/A. Keep the answer concise.\n"
-                f"Question: {question}\n"
-                f"Job description:\n{context}\n"
-                "Answer:"
-            )
-            for question in FIELD_QUESTIONS.values()
-        ]
+        fields_json = json.dumps(FIELD_DEFINITIONS, ensure_ascii=False, indent=2)
+        return (
+            f"{SYSTEM_PROMPT}\n\n"
+            f"Extract the following fields from the job description below. "
+            f"Return ONLY a valid JSON object with these keys. "
+            f"If information is missing, use N/A as the value.\n\n"
+            f"Fields to extract:\n{fields_json}\n\n"
+            f"Job description:\n{context}"
+        )
 
-    def _generate_answers(self, prompts: list[str]) -> list[str]:
-        answers: list[str] = []
-        batch_size = settings.INFERENCE_BATCH_SIZE
-
-        for start in range(0, len(prompts), batch_size):
-            batch = prompts[start : start + batch_size]
-            batch_fields = list(FIELD_QUESTIONS)[start : start + batch_size]
-            chat_batch = [
-                self.tokenizer.apply_chat_template(
-                    [
-                        {
-                            "role": "system",
-                            "content": (
-                                "You extract facts from job descriptions. "
-                                "Never invent missing information."
-                            ),
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    tokenize=False,
-                    add_generation_prompt=True,
-                )
-                for prompt in batch
-            ]
-            inputs = self.tokenizer(
-                chat_batch,
-                return_tensors="pt",
-                padding=True,
-                max_length=settings.MAX_INPUT_LENGTH,
-                truncation=True,
-            ).to(self.device)
-
-            with torch.inference_mode():
-                outputs = self.model.generate(
-                    **inputs,
-                    max_new_tokens=(
-                        settings.MAX_DESCRIPTION_OUTPUT_LENGTH
-                        if "short_description" in batch_fields
-                        else settings.MAX_FIELD_OUTPUT_LENGTH
-                    ),
-                    do_sample=False,
-                    repetition_penalty=1.1,
-                    no_repeat_ngram_size=3,
-                    pad_token_id=self.tokenizer.pad_token_id,
-                    eos_token_id=self.tokenizer.eos_token_id,
-                )
-
-            prompt_length = inputs["input_ids"].shape[1]
-            generated_tokens = outputs[:, prompt_length:]
-            answers.extend(
-                value.strip()
-                for value in self.tokenizer.batch_decode(
-                    generated_tokens,
-                    skip_special_tokens=True,
-                )
-            )
-
-        return answers
+    def _generate_answers(self, prompt: str) -> dict[str, str]:
+        client = self._get_client()
+        response = client.models.generate_content(
+            model=settings.GEMINI_MODEL,
+            contents=prompt,
+            config={
+                "response_mime_type": "application/json",
+                "response_schema": GeminiExtraction,
+                "temperature": 0.1,
+            },
+        )
+        raw = (response.text or "").strip()
+        if not raw:
+            raise RuntimeError("Gemini returned an empty response.")
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+        return GeminiExtraction.model_validate_json(raw).model_dump()
 
     @staticmethod
     def _clean_scalar(value: str) -> str:
@@ -138,7 +110,7 @@ class Summarizer:
         return " ".join(words[:limit]).strip(" ,;.-")
 
     @staticmethod
-    def _compact_description(value: str, word_limit: int = 60) -> str:
+    def _compact_description(value: str, word_limit: int = 35) -> str:
         text = " ".join(value.split()).strip(" \t\r\n\"'")
         if not text:
             return ""
@@ -147,7 +119,7 @@ class Summarizer:
             sentence_candidates = [
                 match.end()
                 for match in re.finditer(r"[.!?](?=\s|$)", text)
-                if 25 <= len(text[:match.end()].split()) <= word_limit
+                if 12 <= len(text[:match.end()].split()) <= word_limit
             ]
             if sentence_candidates:
                 text = text[:sentence_candidates[-1]]
@@ -155,7 +127,7 @@ class Summarizer:
                 clause_candidates = [
                     match.end()
                     for match in re.finditer(r"[,;](?=\s|$)", text)
-                    if 20 <= len(text[:match.end()].split()) <= word_limit
+                    if 15 <= len(text[:match.end()].split()) <= word_limit
                 ]
                 if clause_candidates:
                     text = text[:clause_candidates[-1]]
@@ -212,10 +184,20 @@ class Summarizer:
             return ""
 
         section = text[heading.end():]
+        marked_heading = re.search(
+            r"(?:^|[\r\n])\s*\[\[HEADING\]\]\s*[^\r\n]+(?:[\r\n]|$)",
+            section,
+            flags=re.IGNORECASE,
+        )
+        if marked_heading:
+            return section[:marked_heading.start()].strip(" \t\r\n.-")
+
         next_heading = re.search(
             r"(?:^|[\r\n])\s*(?:\[\[HEADING\]\]\s*)?"
             r"(?:requirements?|qualifications?|minimum\s+qualifications?|"
             r"note\s+for\s+recruiter|benefits?|why\s+join(?:\s+us)?|"
+            r"interview\s+process|hiring\s+process|recruitment\s+process|"
+            r"how\s+to\s+apply|company\s+information|"
             r"job\s+description|about\s+(?:the\s+)?(?:job|role))"
             r"\s*(?:[:?\-]\s*)?(?:[\r\n]|$)",
             section,
@@ -226,7 +208,9 @@ class Summarizer:
         else:
             flattened_heading = re.search(
                 r"\s+(?:Requirements?|Qualifications?|Minimum Qualifications?|"
-                r"Note for Recruiter|Benefits?|Why Join(?: Us)?)\s*(?:[:?\-]\s*)?",
+                r"Note for Recruiter|Benefits?|Why Join(?: Us)?|"
+                r"Interview Process|Hiring Process|Recruitment Process|"
+                r"How to Apply|Company Information)\s*(?:[:?\-]\s*)?",
                 section,
             )
             if flattened_heading:
@@ -334,11 +318,13 @@ class Summarizer:
         value: str,
         word_limit: int,
         tag_mode: bool = False,
+        max_items: int = 5,
+        split_commas: bool = False,
     ) -> list[str]:
-        parts = re.split(
-            r"[;\n\u2022]|\s+-\s+|,(?=\s*[^,])",
-            value,
-        )
+        separators = r"[;\n\u2022]|\s+-\s+"
+        if split_commas:
+            separators += r"|,(?=\s*[A-Za-z])"
+        parts = re.split(separators, value)
         cleaned: list[str] = []
         for part in parts:
             part = re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", part)
@@ -349,6 +335,8 @@ class Summarizer:
             item = self._truncate_words(item, word_limit)
             if item and item.lower() not in {existing.lower() for existing in cleaned}:
                 cleaned.append(item)
+                if len(cleaned) == max_items:
+                    break
         return cleaned
 
     def _normalize_answers(
@@ -362,23 +350,51 @@ class Summarizer:
 
         source_responsibilities = self._extract_heading_section(
             source_text,
-            r"(?:key\s+)?responsibilities?|what\s+you(?:'|’)?ll\s+do|your\s+role",
+            r"(?:key\s+)?responsibilities?|what\s+you(?:'|'')?ll\s+do|your\s+role",
             r"requirements?|qualifications?|benefits?|why\s+join(?:\s+us)?|"
             r"job\s+description|about\s+(?:the\s+)?(?:job|role)",
         )
-        source_requirements = self._extract_labeled_section(
+        requirement_labels = r"requirements?|qualifications?|yêu cầu(?: công việc)?"
+        source_requirements = self._extract_heading_section(
             source_text,
-            r"requirements?|qualifications?|yêu cầu(?: công việc)?",
+            requirement_labels,
+        ) or self._extract_labeled_section(
+            source_text,
+            requirement_labels,
             r"benefits?|why\s+join(?:\s+us)?|quyền lợi|phúc lợi|responsibilities?|mô tả công việc",
         )
-        source_why_join = self._extract_labeled_section(
-            source_text,
-            r"benefits?|why\s+join(?:\s+us)?|quyền lợi|phúc lợi",
-            r"requirements?|qualifications?|yêu cầu(?: công việc)?|responsibilities?|mô tả công việc",
+        benefit_labels = (
+            r"benefits?|perks?|what\s+we\s+offer|why\s+join(?:\s+us)?|"
+            r"quyền lợi|phúc lợi"
         )
-        data["requirements"] = source_responsibilities
-        if source_why_join:
-            data["why_join"] = source_why_join
+        source_why_join = self._extract_heading_section(
+            source_text,
+            benefit_labels,
+        ) or self._extract_labeled_section(
+            source_text,
+            benefit_labels,
+            r"requirements?|qualifications?|yêu cầu(?: công việc)?|responsibilities?|"
+            r"mô tả công việc|interview\s+process|hiring\s+process|"
+            r"recruitment\s+process|how\s+to\s+apply|company\s+information",
+        )
+        # Some job sites render the next section as plain bold text instead of
+        # a heading. Enforce the Benefits boundary after extraction as well.
+        non_benefit_section = re.search(
+            r"(?:\[\[HEADING\]\]\s*)?\b(?:interview\s+process|hiring\s+process|"
+            r"recruitment\s+process|application\s+process|how\s+to\s+apply|"
+            r"company\s+information)\s*(?:[:?\-]|[\r\n]|$)",
+            source_why_join,
+            flags=re.IGNORECASE,
+        )
+        if non_benefit_section:
+            source_why_join = source_why_join[:non_benefit_section.start()].rstrip()
+        # Gemini selects the most relevant requirement keywords. Fall back to
+        # the URL's Requirements section, then Responsibilities when necessary.
+        data["requirements"] = (
+            data.get("requirements") or source_requirements or source_responsibilities
+        )
+        # Why Join must come only from the URL's explicit benefits section.
+        data["why_join"] = source_why_join
         source_bounty = self._extract_bounty(source_text)
         if source_bounty:
             data["bounty"] = source_bounty
@@ -403,10 +419,14 @@ class Summarizer:
             data.pop("requirements"),
             requirement_limits[req_format],
             tag_mode=req_format == "tag",
+            max_items=5,
+            split_commas=True,
         )
-        why_join_limits = {"short": 15, "ultra_short": 8}
+        why_join_limits = {"short": 30, "ultra_short": 8}
         why_join = self._clean_list(
-            data.pop("why_join"), why_join_limits[why_join_format]
+            data.pop("why_join"),
+            why_join_limits[why_join_format],
+            max_items=5,
         )
 
         description = self._compact_description(data["short_description"])
@@ -437,9 +457,8 @@ class Summarizer:
         if why_join_format not in settings.WHY_JOIN_FORMATS:
             raise ValueError(f"Unsupported Why Join format: {why_join_format}")
 
-        prompts = self.build_prompts(text)
-        generated = self._generate_answers(prompts)
-        answers = dict(zip(FIELD_QUESTIONS, generated, strict=True))
+        prompt = self.build_prompt(text)
+        answers = self._generate_answers(prompt)
         return self._normalize_answers(
             answers,
             req_format,

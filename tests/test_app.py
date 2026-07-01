@@ -133,8 +133,11 @@ class SummarizerNormalizationTests(unittest.TestCase):
 
         result = summarizer._normalize_answers(answers, "short", "short")
 
-        self.assertEqual(result.short_description, "Python Developer role.")
-        self.assertEqual(result.requirements, [])
+        self.assertEqual(
+            result.short_description,
+            "Python Developer role requiring Python, FastAPI.",
+        )
+        self.assertEqual(result.requirements, ["Python", "FastAPI"])
         self.assertEqual(result.why_join, [])
 
     def test_word_limits_follow_both_prd_options(self) -> None:
@@ -156,11 +159,50 @@ class SummarizerNormalizationTests(unittest.TestCase):
             answers,
             "tag",
             "ultra_short",
-            source_text="Responsibilities\none two three four five six seven eight nine ten",
+            source_text=(
+                "Responsibilities\n"
+                "one two three four five six seven eight nine ten\n"
+                "Benefits\n"
+                "one two three four five six seven eight nine ten"
+            ),
         )
 
         self.assertLessEqual(len(result.requirements[0].split()), 3)
         self.assertLessEqual(len(result.why_join[0].split()), 8)
+
+    def test_requirements_and_why_join_are_limited_to_five_items(self) -> None:
+        summarizer = Summarizer.__new__(Summarizer)
+        answers = {
+            "job_title": "Developer",
+            "subtitle": "",
+            "employment_type": "Full-time",
+            "contract_type": "Permanent",
+            "location": "Remote",
+            "salary": "",
+            "bounty": "",
+            "short_description": "Build software.",
+            "requirements": "Python; FastAPI; PostgreSQL; AWS; Docker; Redis; Git",
+            "why_join": "N/A",
+        }
+        source = (
+            "Benefits\n"
+            "Health insurance\nAnnual bonus\nFlexible hours\nCompany trip\n"
+            "Training budget\nFree lunch\nExtra leave"
+        )
+
+        result = summarizer._normalize_answers(
+            answers,
+            "short",
+            "short",
+            source_text=source,
+        )
+
+        self.assertEqual(len(result.requirements), 5)
+        self.assertEqual(len(result.why_join), 5)
+        self.assertEqual(
+            result.requirements,
+            ["Python", "FastAPI", "PostgreSQL", "AWS", "Docker"],
+        )
 
     def test_tag_output_uses_tag_notation(self) -> None:
         text = format_output(
@@ -238,9 +280,9 @@ class SummarizerNormalizationTests(unittest.TestCase):
             "developing, and maintaining complex software systems using JavaScript and related "
             "technologies, working closely with other teams.",
         )
-        self.assertLessEqual(len(compact.split()), 60)
+        self.assertLessEqual(len(compact.split()), 35)
 
-    def test_description_keeps_multiple_sentences(self) -> None:
+    def test_description_keeps_at_most_two_sentences(self) -> None:
         description = (
             "Lead the design and delivery of scalable JavaScript systems across the platform. "
             "Guide engineers, define technical standards, and collaborate with product teams to "
@@ -250,8 +292,14 @@ class SummarizerNormalizationTests(unittest.TestCase):
 
         compact = Summarizer._compact_description(description)
 
-        self.assertEqual(compact, description)
-        self.assertEqual(compact.count("."), 3)
+        self.assertEqual(
+            compact,
+            "Lead the design and delivery of scalable JavaScript systems across the platform. "
+            "Guide engineers, define technical standards, and collaborate with product teams to "
+            "turn business requirements into reliable solutions.",
+        )
+        self.assertEqual(compact.count("."), 2)
+        self.assertLessEqual(len(compact.split()), 35)
 
     def test_labeled_sections_override_missing_model_answers(self) -> None:
         summarizer = Summarizer.__new__(Summarizer)
@@ -280,12 +328,116 @@ class SummarizerNormalizationTests(unittest.TestCase):
             source_text=source,
         )
 
-        self.assertEqual(result.requirements, [])
-        self.assertIn("competitive salary", result.why_join)
+        self.assertEqual(
+            result.requirements,
+            ["8+ YOE Python", "deep Golang expertise", "Amazon Web Services"],
+        )
+        self.assertTrue(any("competitive salary" in item for item in result.why_join))
         self.assertTrue(all(len(item.split()) <= 3 for item in result.requirements))
         self.assertTrue(all(len(item.split()) <= 8 for item in result.why_join))
 
-    def test_responsibilities_are_mapped_to_requirements_output(self) -> None:
+    def test_model_generated_why_join_is_ignored_without_benefits_section(self) -> None:
+        summarizer = Summarizer.__new__(Summarizer)
+        answers = {
+            "job_title": "Platform Engineer",
+            "subtitle": "",
+            "employment_type": "Full-time",
+            "contract_type": "Permanent",
+            "location": "Remote",
+            "salary": "",
+            "bounty": "",
+            "short_description": "Build a reliable cloud platform.",
+            "requirements": "N/A",
+            "why_join": (
+                "Build a high-impact cloud platform; "
+                "Work with modern Kubernetes infrastructure"
+            ),
+        }
+
+        result = summarizer._normalize_answers(
+            answers,
+            "short",
+            "short",
+            source_text=(
+                "Build a reliable cloud platform used across engineering teams. "
+                "Design and operate modern Kubernetes infrastructure."
+            ),
+        )
+
+        self.assertEqual(result.why_join, [])
+
+    def test_benefits_are_extracted_from_html_heading(self) -> None:
+        summarizer = Summarizer.__new__(Summarizer)
+        answers = {
+            "job_title": "Platform Engineer",
+            "subtitle": "",
+            "employment_type": "Full-time",
+            "contract_type": "Permanent",
+            "location": "Remote",
+            "salary": "",
+            "bounty": "",
+            "short_description": "Build a reliable cloud platform.",
+            "requirements": "N/A",
+            "why_join": "N/A",
+        }
+        html = (
+            b"<h2>Benefits</h2><ul><li>Private health insurance</li>"
+            b"<li>Salary review every 6 months if salary is less than 30,000,000 VND</li>"
+            b"<li>Opportunity to be trained overseas, develop English communication skill</li>"
+            b"</ul><p><strong>Interview process:</strong></p>"
+            b"<p>R1: Online with HR</p>"
+        )
+
+        result = summarizer._normalize_answers(
+            answers,
+            "short",
+            "short",
+            source_text=_extract_visible_text(html, "text/html", "utf-8"),
+        )
+
+        self.assertEqual(
+            result.why_join,
+            [
+                "Private health insurance",
+                "Salary review every 6 months if salary is less than 30,000,000 VND",
+                "Opportunity to be trained overseas, develop English communication skill",
+            ],
+        )
+        self.assertFalse(any(item == "000" for item in result.why_join))
+        self.assertFalse(any("Online with HR" in item for item in result.why_join))
+
+    def test_interview_process_is_removed_when_not_an_html_heading(self) -> None:
+        summarizer = Summarizer.__new__(Summarizer)
+        answers = {
+            "job_title": "Developer",
+            "subtitle": "",
+            "employment_type": "Full-time",
+            "contract_type": "Permanent",
+            "location": "Remote",
+            "salary": "",
+            "bounty": "",
+            "short_description": "Build software.",
+            "requirements": "N/A",
+            "why_join": "N/A",
+        }
+        source = (
+            "Benefits: Private health insurance; Company trip once a year "
+            "Interview process: R1: Online with HR; R2: Technical interview"
+        )
+
+        result = summarizer._normalize_answers(
+            answers,
+            "short",
+            "short",
+            source_text=source,
+        )
+
+        self.assertEqual(
+            result.why_join,
+            ["Private health insurance", "Company trip once a year"],
+        )
+
+    def test_requirements_output_uses_requirements_not_responsibilities(self) -> None:
         summarizer = Summarizer.__new__(Summarizer)
         answers = {
             "job_title": "Technical Architect",
@@ -318,12 +470,12 @@ class SummarizerNormalizationTests(unittest.TestCase):
 
         self.assertEqual(
             result.requirements,
-            [
-                "Lead the design of scalable JavaScript systems",
-                "Collaborate with product and engineering teams",
-            ],
+            ["Ten years of software engineering experience"],
         )
-        self.assertNotIn("Ten years of software engineering experience", result.requirements)
+        self.assertNotIn(
+            "Lead the design of scalable JavaScript systems",
+            result.requirements,
+        )
 
     def test_responsibilities_stop_at_html_requirements_heading(self) -> None:
         html = (
@@ -377,7 +529,10 @@ class SummarizerNormalizationTests(unittest.TestCase):
             source_text=source,
         )
 
-        self.assertEqual(result.requirements, [])
+        self.assertEqual(
+            result.requirements,
+            ["5+ YOE Python", "Golang", "AWS", "SQL", "English Communication"],
+        )
         self.assertEqual(
             result.why_join,
             ["Competitive salary and annual leave", "Private health insurance"],
