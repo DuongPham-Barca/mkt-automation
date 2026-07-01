@@ -1,0 +1,14 @@
+.env
+.venv
+.git
+.github
+.agents
+__pycache__
+.pytest_cache
+tests
+uploads
+*.py[cod]
+*.pdf
+*.docx
+Dockerfile
+requirements-space.txt

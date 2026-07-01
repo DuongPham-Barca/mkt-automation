@@ -12,7 +12,7 @@ RUN python -m pip install --upgrade pip && \
     python -m pip install -r requirements-space.txt
 
 COPY --chown=user:user app ./app
-COPY --chown=user:user static ./static
+COPY --chown=user:user public ./public
 COPY --chown=user:user main.py ./main.py
 
 USER user

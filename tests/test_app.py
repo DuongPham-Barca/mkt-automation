@@ -7,6 +7,7 @@ import app.router as router_module
 from app.formatter import format_output
 from app.summarize import Summarizer
 from app.url_extractor import _extract_visible_text, _validate_public_url
+from index import app as vercel_app
 from main import app
 
 
@@ -42,6 +43,14 @@ class ApplicationTests(unittest.TestCase):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertIn("MKT Automation", response.text)
+
+    def test_frontend_script_is_available_locally(self) -> None:
+        response = self.client.get("/app.js")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("async function summarize", response.text)
+
+    def test_vercel_entrypoint_exports_the_fastapi_app(self) -> None:
+        self.assertIs(vercel_app, app)
 
     def test_healthcheck_does_not_load_model(self) -> None:
         response = self.client.get("/healthz")
