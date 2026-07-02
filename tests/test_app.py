@@ -1,3 +1,4 @@
+import re
 import unittest
 from unittest.mock import patch
 
@@ -244,6 +245,32 @@ class SummarizerNormalizationTests(unittest.TestCase):
                 self.assertEqual(tag, expected)
                 self.assertLessEqual(len(tag.split()), 3)
 
+    def test_tags_do_not_end_with_dangling_and_or(self) -> None:
+        summarizer = Summarizer.__new__(Summarizer)
+        tags = summarizer._clean_list(
+            (
+                "4+ years of experience; Business Development or Sales; "
+                "Fluent English; Understanding of payment; "
+                "Strong negotiation and communication skills"
+            ),
+            word_limit=3,
+            tag_mode=True,
+        )
+
+        self.assertEqual(
+            tags,
+            [
+                "4+ YOE",
+                "Business Development/Sales",
+                "Fluent English",
+                "Understanding of payment",
+                "Negotiation & Communication",
+            ],
+        )
+        self.assertTrue(
+            all(not re.search(r"\b(?:and|or)$", tag, re.IGNORECASE) for tag in tags)
+        )
+
     def test_labeled_bounty_is_extracted_from_source(self) -> None:
         summarizer = Summarizer.__new__(Summarizer)
         answers = {
@@ -291,7 +318,7 @@ class SummarizerNormalizationTests(unittest.TestCase):
         )
         self.assertLessEqual(len(compact.split()), 35)
 
-    def test_description_keeps_at_most_two_sentences(self) -> None:
+    def test_description_is_exactly_one_sentence(self) -> None:
         description = (
             "Lead the design and delivery of scalable JavaScript systems across the platform. "
             "Guide engineers, define technical standards, and collaborate with product teams to "
@@ -301,13 +328,10 @@ class SummarizerNormalizationTests(unittest.TestCase):
 
         compact = Summarizer._compact_description(description)
 
-        self.assertEqual(
-            compact,
-            "Lead the design and delivery of scalable JavaScript systems across the platform. "
-            "Guide engineers, define technical standards, and collaborate with product teams to "
-            "turn business requirements into reliable solutions.",
-        )
-        self.assertEqual(compact.count("."), 2)
+        self.assertEqual(compact.count("."), 1)
+        self.assertTrue(compact.endswith("."))
+        self.assertIn("Lead the design and delivery", compact)
+        self.assertIn("Guide engineers", compact)
         self.assertLessEqual(len(compact.split()), 35)
 
     def test_labeled_sections_override_missing_model_answers(self) -> None:
@@ -339,7 +363,7 @@ class SummarizerNormalizationTests(unittest.TestCase):
 
         self.assertEqual(
             result.requirements,
-            ["8+ YOE Python", "deep Golang expertise", "Amazon Web Services"],
+            ["8+ YOE Python", "Golang expertise", "Amazon Web Services"],
         )
         self.assertTrue(any("competitive salary" in item for item in result.why_join))
         self.assertTrue(all(len(item.split()) <= 3 for item in result.requirements))

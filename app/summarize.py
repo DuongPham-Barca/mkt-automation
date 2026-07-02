@@ -17,14 +17,14 @@ FIELD_DEFINITIONS = {
     "job_title": "job title (exact as written)",
     "subtitle": "short subtitle (1 phrase, under 10 words)",
     "employment_type": "employment type: Full-time, Part-time, or Contract",
-    "contract_type": "contract type: permanent, temporary, fixed-term, freelance, or other",
+    "contract_type": "contract type: In-Office, Remote or Hybrid",
     "location": "job location",
     "salary": "salary (exact amount if stated, otherwise N/A)",
     "bounty": "referral / hiring bounty (exact amount if stated, otherwise N/A)",
     "short_description": (
-        "short description: 1-2 complete sentences (25-35 words). "
-        "Keep only the primary responsibility, core technologies/skills, "
-        "and the role's main impact. Avoid generic or repeated details."
+        "exactly one complete sentence (25-35 words) summarizing the primary role, "
+        "main responsibilities, core technologies/skills, and the role's main impact. "
+        "Avoid generic, repeated, or secondary details."
     ),
     "requirements": (
         "4-5 most important job requirement keywords or short phrases, separated by "
@@ -115,6 +115,9 @@ class Summarizer:
         if not text:
             return ""
 
+        # Keep one compound sentence even if the model returned several.
+        text = re.sub(r"[.!?]+(?=\s+\S)", ";", text)
+
         if len(text.split()) > word_limit:
             sentence_candidates = [
                 match.end()
@@ -133,9 +136,6 @@ class Summarizer:
                     text = text[:clause_candidates[-1]]
                 else:
                     text = " ".join(text.split()[:word_limit])
-
-        if text.rstrip().endswith((".", "!", "?")):
-            return text.rstrip()
 
         dangling_words = {
             "a", "an", "and", "as", "at", "by", "for", "from", "in", "of",
@@ -291,6 +291,39 @@ class Summarizer:
         return value
 
     @staticmethod
+    def _finalize_requirement_tag(value: str, word_limit: int = 3) -> str:
+        value = re.sub(
+            r"^(?:strong|excellent|solid|good|deep)\s+",
+            "",
+            value,
+            flags=re.IGNORECASE,
+        )
+        value = re.sub(
+            r"\s+(?:skills?|experience|knowledge)$",
+            "",
+            value,
+            flags=re.IGNORECASE,
+        )
+        # Preserve both alternatives without spending a word on a connector.
+        value = re.sub(r"\s+or\s+", "/", value, flags=re.IGNORECASE)
+        value = re.sub(r"\s+and\s+", " & ", value, flags=re.IGNORECASE)
+
+        words = value.split()[:word_limit]
+        dangling = {"and", "or", "&", "of", "with", "for", "to", "in", "on"}
+        while words and words[0].lower().strip(".,;:/") in {"and", "or", "&"}:
+            words.pop(0)
+        while words and words[-1].lower().strip(".,;:/") in dangling:
+            words.pop()
+
+        tag = " ".join(words).strip(" ,;:./&-")
+        tag = re.sub(
+            r"(?:(?<=&\s)|(?<=/))([a-z])",
+            lambda match: match.group(1).upper(),
+            tag,
+        )
+        return tag[:1].upper() + tag[1:] if tag else ""
+
+    @staticmethod
     def _extract_bounty(text: str) -> str:
         money_match = re.search(
             r"(?:referral\s+bonus|referral\s+bounty|hiring\s+bounty|bounty)"
@@ -332,7 +365,9 @@ class Summarizer:
             item = self._clean_scalar(item)
             if tag_mode:
                 item = self._compact_requirement_tag(item)
-            item = self._truncate_words(item, word_limit)
+                item = self._finalize_requirement_tag(item, word_limit)
+            else:
+                item = self._truncate_words(item, word_limit)
             if item and item.lower() not in {existing.lower() for existing in cleaned}:
                 cleaned.append(item)
                 if len(cleaned) == max_items:
