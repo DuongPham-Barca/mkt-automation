@@ -27,7 +27,7 @@ FIELD_DEFINITIONS = {
         "Avoid generic, repeated, or secondary details."
     ),
     "requirements": (
-        "4-5 most important job requirement keywords or short phrases, separated by "
+        "4-5 most important job requirements, meaningfully summarized and separated by "
         "semicolons. Prioritize required skills, technologies, years of experience, "
         "domain knowledge, language, and education. Preserve exact technology names "
         "and numeric experience from the job description; never invent requirements."
@@ -67,14 +67,35 @@ class Summarizer:
         max_chars = settings.MAX_INPUT_LENGTH * 4
         return text[:max_chars] if len(text) > max_chars else text
 
-    def build_prompt(self, text: str) -> str:
+    def build_prompt(
+        self,
+        text: str,
+        req_format: str = "short",
+        why_join_format: str = "short",
+    ) -> str:
         context = self._truncate_context(text)
         fields_json = json.dumps(FIELD_DEFINITIONS, ensure_ascii=False, indent=2)
+        requirement_style = {
+            "short": "a concise, complete phrase of at most 15 words per item",
+            "ultra_short": "a meaningful summary of at most 8 words per item",
+            "tag": "a standalone skill/qualification tag of at most 3 words per item",
+        }[req_format]
+        why_join_style = {
+            "short": "a concise, complete phrase of at most 30 words per item",
+            "ultra_short": "a meaningful summary of at most 8 words per item",
+        }[why_join_format]
         return (
             f"{SYSTEM_PROMPT}\n\n"
             f"Extract the following fields from the job description below. "
             f"Return ONLY a valid JSON object with these keys. "
             f"If information is missing, use N/A as the value.\n\n"
+            f"Requirements format: rewrite each selected requirement as {requirement_style}.\n"
+            f"Why Join format: rewrite each explicit benefit as {why_join_style}.\n"
+            f"Summarize the meaning of each item; never shorten it by simply taking the "
+            f"first N words. Every item must stand on its own and must not end with a "
+            f"dangling word such as 'to', 'every', 'and', 'or', 'of', or 'with'. "
+            f"Why Join items must come only from an explicit Benefits, Perks, What We "
+            f"Offer, or Why Join section.\n\n"
             f"Fields to extract:\n{fields_json}\n\n"
             f"Job description:\n{context}"
         )
@@ -103,27 +124,6 @@ class Summarizer:
         if cleaned.lower().strip(". -") in {"", "n/a", "na", "none", "unknown", "not specified", "or"}:
             return ""
         return cleaned
-
-    @staticmethod
-    def _truncate_words(value: str, limit: int) -> str:
-        words = value.split()
-        words = words[:limit]
-
-        # A hard word limit can leave a grammatically incomplete fragment such
-        # as "Salary review every" or "Opportunity to". Back up over words
-        # that require a complement so text-format requirements and benefits
-        # still read as meaningful phrases.
-        dangling_words = {
-            "a", "an", "the", "and", "or", "but", "to", "of", "for",
-            "with", "without", "in", "on", "at", "from", "by", "as",
-            "into", "through", "across", "about", "between", "among",
-            "every", "each", "any", "all", "both", "either", "neither",
-            "this", "that", "these", "those", "your", "our", "their",
-        }
-        while words and words[-1].lower().strip(" ,;:./()[]{}-\"") in dangling_words:
-            words.pop()
-
-        return " ".join(words).strip(" ,;.-")
 
     @staticmethod
     def _compact_description(value: str, word_limit: int = 35) -> str:
@@ -365,7 +365,7 @@ class Summarizer:
     def _clean_list(
         self,
         value: str,
-        word_limit: int,
+        word_limit: int | None,
         tag_mode: bool = False,
         max_items: int = 5,
         split_commas: bool = False,
@@ -381,9 +381,11 @@ class Summarizer:
             item = self._clean_scalar(item)
             if tag_mode:
                 item = self._compact_requirement_tag(item)
-                item = self._finalize_requirement_tag(item, word_limit)
+                item = self._finalize_requirement_tag(item, word_limit or 3)
             else:
-                item = self._truncate_words(item, word_limit)
+                # Text formats are already semantically summarized by Gemini.
+                # Do not hard-cut them here; that creates incomplete phrases.
+                item = " ".join(item.split()).strip(" ,;.-")
             if item and item.lower() not in {existing.lower() for existing in cleaned}:
                 cleaned.append(item)
                 if len(cleaned) == max_items:
@@ -444,8 +446,11 @@ class Summarizer:
         data["requirements"] = (
             data.get("requirements") or source_requirements or source_responsibilities
         )
-        # Why Join must come only from the URL's explicit benefits section.
-        data["why_join"] = source_why_join
+        # Why Join must have an explicit source section. Prefer Gemini's concise
+        # rewrite and use the source text only as a fallback when extraction is empty.
+        data["why_join"] = (
+            (data.get("why_join") or source_why_join) if source_why_join else ""
+        )
         source_bounty = self._extract_bounty(source_text)
         if source_bounty:
             data["bounty"] = source_bounty
@@ -465,18 +470,16 @@ class Summarizer:
         if data["bounty"].lower() == data["salary"].lower():
             data["bounty"] = ""
 
-        requirement_limits = {"short": 15, "ultra_short": 8, "tag": 3}
         requirements = self._clean_list(
             data.pop("requirements"),
-            requirement_limits[req_format],
+            3 if req_format == "tag" else None,
             tag_mode=req_format == "tag",
             max_items=5,
             split_commas=True,
         )
-        why_join_limits = {"short": 30, "ultra_short": 8}
         why_join = self._clean_list(
             data.pop("why_join"),
-            why_join_limits[why_join_format],
+            None,
             max_items=5,
         )
 
@@ -508,7 +511,7 @@ class Summarizer:
         if why_join_format not in settings.WHY_JOIN_FORMATS:
             raise ValueError(f"Unsupported Why Join format: {why_join_format}")
 
-        prompt = self.build_prompt(text)
+        prompt = self.build_prompt(text, req_format, why_join_format)
         answers = self._generate_answers(prompt)
         return self._normalize_answers(
             answers,

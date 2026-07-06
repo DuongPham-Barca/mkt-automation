@@ -150,37 +150,19 @@ class SummarizerNormalizationTests(unittest.TestCase):
         self.assertEqual(result.requirements, ["Python", "FastAPI"])
         self.assertEqual(result.why_join, [])
 
-    def test_word_limits_follow_both_prd_options(self) -> None:
+    def test_format_word_limits_are_given_to_the_model(self) -> None:
         summarizer = Summarizer.__new__(Summarizer)
-        answers = {
-            "job_title": "Developer",
-            "subtitle": "",
-            "employment_type": "Full-time",
-            "contract_type": "Permanent",
-            "location": "Remote",
-            "salary": "",
-            "bounty": "",
-            "short_description": "",
-            "requirements": "one two three four five six seven eight nine ten",
-            "why_join": "one two three four five six seven eight nine ten",
-        }
-
-        result = summarizer._normalize_answers(
-            answers,
+        prompt = summarizer.build_prompt(
+            "Requirements: Python. Benefits: Learning budget.",
             "tag",
             "ultra_short",
-            source_text=(
-                "Responsibilities\n"
-                "one two three four five six seven eight nine ten\n"
-                "Benefits\n"
-                "one two three four five six seven eight nine ten"
-            ),
         )
 
-        self.assertLessEqual(len(result.requirements[0].split()), 3)
-        self.assertLessEqual(len(result.why_join[0].split()), 8)
+        self.assertIn("at most 3 words per item", prompt)
+        self.assertIn("at most 8 words per item", prompt)
+        self.assertIn("never shorten it by simply taking the first N words", prompt)
 
-    def test_text_formats_do_not_end_with_dangling_words(self) -> None:
+    def test_text_formats_are_not_hard_truncated_by_backend(self) -> None:
         summarizer = Summarizer.__new__(Summarizer)
         answers = {
             "job_title": "Developer",
@@ -193,13 +175,13 @@ class SummarizerNormalizationTests(unittest.TestCase):
             "short_description": "Build software.",
             "requirements": (
                 "Experience designing reliable distributed services used by teams every day; "
-                "Ability to communicate technical decisions clearly to"
+                "Ability to communicate technical decisions clearly to stakeholders"
             ),
-            "why_join": "N/A",
+            "why_join": "Flexible remote work supports a healthy work-life balance",
         }
         source = (
             "Benefits\n"
-            "Salary reviews occur twice per year every\n"
+            "Salary reviews occur twice per year\n"
             "A dedicated learning budget and mentoring program to support career growth"
         )
 
@@ -213,23 +195,15 @@ class SummarizerNormalizationTests(unittest.TestCase):
         self.assertEqual(
             result.requirements,
             [
-                "Experience designing reliable distributed services used by teams",
-                "Ability to communicate technical decisions clearly",
+                "Experience designing reliable distributed services used by teams every day",
+                "Ability to communicate technical decisions clearly to stakeholders",
             ],
         )
         self.assertEqual(
             result.why_join,
             [
-                "Salary reviews occur twice per year",
-                "A dedicated learning budget and mentoring program",
+                "Flexible remote work supports a healthy work-life balance",
             ],
-        )
-        dangling = {"every", "to"}
-        self.assertTrue(
-            all(item.split()[-1].lower() not in dangling for item in result.requirements)
-        )
-        self.assertTrue(
-            all(item.split()[-1].lower() not in dangling for item in result.why_join)
         )
 
     def test_requirements_and_why_join_are_limited_to_five_items(self) -> None:
@@ -419,7 +393,7 @@ class SummarizerNormalizationTests(unittest.TestCase):
         )
         self.assertTrue(any("competitive salary" in item for item in result.why_join))
         self.assertTrue(all(len(item.split()) <= 3 for item in result.requirements))
-        self.assertTrue(all(len(item.split()) <= 8 for item in result.why_join))
+        self.assertTrue(any("private health insurance" in item for item in result.why_join))
 
     def test_model_generated_why_join_is_ignored_without_benefits_section(self) -> None:
         summarizer = Summarizer.__new__(Summarizer)
