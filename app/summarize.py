@@ -107,7 +107,23 @@ class Summarizer:
     @staticmethod
     def _truncate_words(value: str, limit: int) -> str:
         words = value.split()
-        return " ".join(words[:limit]).strip(" ,;.-")
+        words = words[:limit]
+
+        # A hard word limit can leave a grammatically incomplete fragment such
+        # as "Salary review every" or "Opportunity to". Back up over words
+        # that require a complement so text-format requirements and benefits
+        # still read as meaningful phrases.
+        dangling_words = {
+            "a", "an", "the", "and", "or", "but", "to", "of", "for",
+            "with", "without", "in", "on", "at", "from", "by", "as",
+            "into", "through", "across", "about", "between", "among",
+            "every", "each", "any", "all", "both", "either", "neither",
+            "this", "that", "these", "those", "your", "our", "their",
+        }
+        while words and words[-1].lower().strip(" ,;:./()[]{}-\"") in dangling_words:
+            words.pop()
+
+        return " ".join(words).strip(" ,;.-")
 
     @staticmethod
     def _compact_description(value: str, word_limit: int = 35) -> str:

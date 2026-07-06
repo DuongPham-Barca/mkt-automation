@@ -180,6 +180,58 @@ class SummarizerNormalizationTests(unittest.TestCase):
         self.assertLessEqual(len(result.requirements[0].split()), 3)
         self.assertLessEqual(len(result.why_join[0].split()), 8)
 
+    def test_text_formats_do_not_end_with_dangling_words(self) -> None:
+        summarizer = Summarizer.__new__(Summarizer)
+        answers = {
+            "job_title": "Developer",
+            "subtitle": "",
+            "employment_type": "Full-time",
+            "contract_type": "Remote",
+            "location": "Remote",
+            "salary": "",
+            "bounty": "",
+            "short_description": "Build software.",
+            "requirements": (
+                "Experience designing reliable distributed services used by teams every day; "
+                "Ability to communicate technical decisions clearly to"
+            ),
+            "why_join": "N/A",
+        }
+        source = (
+            "Benefits\n"
+            "Salary reviews occur twice per year every\n"
+            "A dedicated learning budget and mentoring program to support career growth"
+        )
+
+        result = summarizer._normalize_answers(
+            answers,
+            "ultra_short",
+            "ultra_short",
+            source_text=source,
+        )
+
+        self.assertEqual(
+            result.requirements,
+            [
+                "Experience designing reliable distributed services used by teams",
+                "Ability to communicate technical decisions clearly",
+            ],
+        )
+        self.assertEqual(
+            result.why_join,
+            [
+                "Salary reviews occur twice per year",
+                "A dedicated learning budget and mentoring program",
+            ],
+        )
+        dangling = {"every", "to"}
+        self.assertTrue(
+            all(item.split()[-1].lower() not in dangling for item in result.requirements)
+        )
+        self.assertTrue(
+            all(item.split()[-1].lower() not in dangling for item in result.why_join)
+        )
+
     def test_requirements_and_why_join_are_limited_to_five_items(self) -> None:
         summarizer = Summarizer.__new__(Summarizer)
         answers = {

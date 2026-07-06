@@ -52,6 +52,8 @@ git remote add hf https://huggingface.co/spaces/HF_USERNAME/SPACE_NAME
 git push hf master:main
 ```
 
+`uvicorn main:app --reload --port 8000`
+
 When Git asks for credentials, use the Hugging Face username and the write token as the password. Never commit the token.
 
 ### Development workflow
